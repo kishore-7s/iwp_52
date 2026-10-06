@@ -1,0 +1,501 @@
+pom.xml
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <groupId>com.example</groupId>
+    <artifactId>realtime-mongo-visualization</artifactId>
+    <version>0.0.1-SNAPSHOT</version>
+
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>3.3.2</version>
+        <relativePath/>
+    </parent>
+
+    <dependencies>
+        <!-- Reactive Web + Mongo -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-webflux</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-mongodb-reactive</artifactId>
+        </dependency>
+        <!-- Optional: validation -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-validation</artifactId>
+        </dependency>
+        <!-- Lombok (optional) -->
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+            <optional>true</optional>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <repositories>
+        <repository>
+
+            <id>central</id>
+            <name>Maven Central</name>
+            <url>https://repo1.maven.org/maven2/</url>
+            <releases>
+                <enabled>true</enabled>
+                <updatePolicy>always</updatePolicy>
+            </releases>
+            <snapshots>
+                <enabled>false</enabled>
+            </snapshots>
+        </repository>
+    </repositories>
+
+    <pluginRepositories>
+        <pluginRepository>
+            <id>central-plugins</id>
+            <name>Maven Central Plugin Repository</name>
+            <url>https://repo1.maven.org/maven2/</url>
+            <releases>
+                <enabled>true</enabled>
+                <updatePolicy>always</updatePolicy>
+            </releases>
+            <snapshots>
+                <enabled>false</enabled>
+            </snapshots>
+        </pluginRepository>
+    </pluginRepositories>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
+</project>
+
+/src/main/java/com/example/realtime/RealtimeMongoVisualizationApplication.java
+package com.example.realtime;
+
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+
+@SpringBootApplication
+public class RealtimeMongoVisualizationApplication {
+    public static void main(String[] args) {
+        SpringApplication.run(RealtimeMongoVisualizationApplication.class, args);
+    }
+}
+
+/src/main/java/com/example/realtime/config/DemoDataRunner.java
+package com.example.realtime.config;
+
+import com.example.realtime.model.SensorReading;
+import org.springframework.boot.CommandLineRunner;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.data.mongodb.core.ReactiveMongoTemplate;
+import reactor.core.publisher.Flux;
+
+import java.time.Duration;
+import java.time.Instant;
+import java.util.Random;
+
+@Configuration
+public class DemoDataRunner {
+
+    @Bean
+    CommandLineRunner seed(ReactiveMongoTemplate template) {
+        return args -> {
+            Random rnd = new Random();
+            Flux.interval(Duration.ofSeconds(2))
+                .flatMap(t -> template.save(new SensorReading(Instant.now(), 20 +
+rnd.nextDouble() * 10)))
+                .subscribe();
+        };
+    }
+}
+
+/src/main/java/com/example/realtime/model/SensorReading.java
+package com.example.realtime.model;
+
+import org.springframework.data.annotation.Id;
+import org.springframework.data.mongodb.core.mapping.Document;
+import java.time.Instant;
+
+@Document("sensor_readings")
+public class SensorReading {
+
+    @Id
+    private String id;
+    private Instant timestamp;
+    private double value;
+
+    public SensorReading() {}
+
+    public SensorReading(Instant timestamp, double value) {
+        this.timestamp = timestamp;
+        this.value = value;
+    }
+
+    public String getId() { return id; }
+    public void setId(String id) { this.id = id; }
+
+    public Instant getTimestamp() { return timestamp; }
+    public void setTimestamp(Instant timestamp) { this.timestamp = timestamp; }
+
+    public double getValue() { return value; }
+    public void setValue(double value) { this.value = value; }
+}
+
+/src/main/java/com/example/realtime/repo/SensorReadingRepository.java
+package com.example.realtime.repo;
+
+import com.example.realtime.model.SensorReading;
+import org.springframework.data.mongodb.repository.ReactiveMongoRepository;
+
+public interface SensorReadingRepository extends
+ReactiveMongoRepository<SensorReading, String> {
+}
+
+/src/main/java/com/example/realtime/web/StreamController.java
+package com.example.realtime.web;
+
+import com.example.realtime.model.SensorReading;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.mongodb.core.ChangeStreamOptions;
+import org.springframework.data.mongodb.core.ReactiveMongoTemplate;
+import org.springframework.data.mongodb.core.aggregation.Aggregation;
+import org.springframework.data.mongodb.core.query.Criteria;
+import org.springframework.http.MediaType;
+import org.springframework.stereotype.Controller;
+import org.springframework.web.bind.annotation.*;
+import reactor.core.publisher.Flux;
+
+import java.time.Instant;
+import java.util.HashMap;
+import java.util.Map;
+
+@Controller
+public class StreamController {
+
+    private final ReactiveMongoTemplate template;
+
+    @Autowired
+    public StreamController(ReactiveMongoTemplate template) {
+        this.template = template;
+    }
+
+    // SSE stream of new SensorReading changes
+
+    @GetMapping(path = "/stream/readings", produces =
+MediaType.TEXT_EVENT_STREAM_VALUE)
+    @ResponseBody
+    public Flux<Map<String, Object>> streamReadings() {
+        ChangeStreamOptions options = ChangeStreamOptions.builder()
+                .filter(Aggregation.newAggregation(
+
+Aggregation.match(Criteria.where("operationType").in("insert", "update", "replace"))
+                ))
+                .returnFullDocumentOnUpdate()
+                .build();
+
+        return template.changeStream("sensor_readings", options, SensorReading.class)
+                .map(event -> event.getBody())
+                .filter(reading -> reading != null)
+                .map(reading -> Map.of(
+                        "timestamp", reading.getTimestamp(),
+                        "value", reading.getValue()
+                ));
+    }
+
+    // Quick insert API to simulate data (POST /api/readings?value=42.5)
+    @PostMapping("/api/readings")
+    @ResponseBody
+    public Map<String, Object> addReading(@RequestParam double value) {
+        SensorReading r = new SensorReading(Instant.now(), value);
+        return template.save(r).map(saved -> {
+            Map<String, Object> result = new HashMap<>();
+            result.put("id", saved.getId());
+            result.put("timestamp", saved.getTimestamp());
+            result.put("value", saved.getValue());
+            return result;
+        }).block();
+    }
+}
+
+/src/main/resources/application.properties
+spring.application.name=realtime-mongo-visualization
+
+spring.data.mongodb.uri=mongodb://localhost:27017/realtime?replicaSet=rs0
+
+server.port=8080
+
+spring.webflux.base-path=/ex10
+
+/src/main/resources/static/index.html
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+
+    <title>Real-time MongoDB Chart</title>
+
+    <script
+src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+
+    <style>
+        * {
+              box-sizing: border-box;
+        }
+
+        body {
+            font-family: system-ui, Arial, sans-serif;
+            margin: 0;
+            padding: 30px 20px;
+            background: #f5f5f5;
+        }
+
+        .wrap {
+            max-width: 900px;
+            margin: auto;
+            background: white;
+            padding: 25px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.08);
+        }
+
+        h2 {
+            margin-top: 0;
+            margin-bottom: 20px;
+        }
+
+        .toolbar {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            flex-wrap: wrap;
+            margin-bottom: 20px;
+        }
+
+        input,
+        button {
+
+             padding: 9px 12px;
+             font-size: 14px;
+         }
+
+         input {
+             width: 220px;
+         }
+
+         button {
+             cursor: pointer;
+             border: 1px solid #999;
+             border-radius: 4px;
+             background: #f0f0f0;
+         }
+
+         button:hover {
+             background: #e0e0e0;
+         }
+
+         #status {
+             font-weight: 600;
+             margin-left: 5px;
+         }
+
+         .chart-container {
+             position: relative;
+             width: 100%;
+             height: 420px;
+         }
+
+        canvas {
+            width: 100% !important;
+            height: 100% !important;
+        }
+    </style>
+</head>
+
+<body>
+
+    <div class="wrap">
+
+         <h2>Real-time Sensor Readings (MongoDB → SSE → Chart.js)</h2>
+
+         <div class="toolbar">
+
+             <input
+                 id="val"
+                 type="number"
+                 step="0.1"
+                 placeholder="Enter value e.g. 25.6"
+             />
+
+         <button id="send">
+             Insert Reading
+         </button>
+
+         <span id="status">
+             Connecting...
+         </span>
+
+    </div>
+
+    <div class="chart-container">
+        <canvas id="chart"></canvas>
+    </div>
+
+</div>
+
+
+
+<script>
+    // Chart Setup
+    const ctx = document.getElementById("chart");
+    const labels = [];
+    const data = {
+        labels: labels,
+
+         datasets: [
+             {
+                 label: "Sensor Value",
+                 data: [],
+                 tension: 0.3
+             }
+         ]
+    };
+
+    const chart = new Chart(ctx, {
+        type: "line",
+        data: data,
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            animation: false,
+            scales: {
+                x: {
+                    ticks: {
+                        maxRotation: 0,
+                        autoSkip: true
+                    }
+                },
+                y: {
+                    beginAtZero: false
+                }
+
+          }
+      }
+});
+
+// SSE Connection
+const status = document.getElementById("status");
+const es = new EventSource("stream/readings");
+
+// Connection opened
+es.onopen = function () {
+
+      status.textContent = "Live connected";
+
+};
+
+// Connection error
+es.onerror = function () {
+
+      status.textContent = "Disconnected (retrying...)";
+
+};
+
+// Receive sensor data
+es.onmessage = function (event) {
+
+      try {
+          const reading = JSON.parse(event.data);
+
+          const timestamp = reading.timestamp;
+          const value = reading.value;
+
+          // Add time to X-axis
+          labels.push(
+              new Date(timestamp).toLocaleTimeString()
+          );
+
+          // Add sensor value to Y-axis
+          data.datasets[0].data.push(value);
+
+          // Keep only the latest 50 readings
+          if (labels.length > 50) {
+              labels.shift();
+              data.datasets[0].data.shift();
+          }
+
+          // Refresh chart
+          chart.update();
+
+      }
+      catch (error) {
+          console.error(
+
+                      "Error parsing SSE data:",
+                      error
+                 );
+             }
+        };
+
+        // Insert Reading
+        document.getElementById("send").onclick = async function () {
+            const input = document.getElementById("val");
+            const value = parseFloat(input.value);
+
+             // Validate input
+             if (isNaN(value)) {
+                 alert("Please enter a numeric value.");
+                 return;
+             }
+
+             try {
+                 const response = await fetch(
+                     "api/readings?value=" +
+                     encodeURIComponent(value),
+                     {
+                         method: "POST"
+                     }
+                 );
+
+                 if (!response.ok) {
+                     throw new Error(
+                         "HTTP error: " + response.status
+                     );
+                 }
+
+                 // Clear input
+                 input.value = "";
+             }
+             catch (error) {
+                 console.error(
+                     "Error inserting reading:",
+                     error
+                 );
+                 alert(
+                     "Failed to insert reading."
+                 );
+             }
+        };
+    </script>
+</body>
+</html>
